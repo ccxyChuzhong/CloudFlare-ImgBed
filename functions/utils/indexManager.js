@@ -529,7 +529,17 @@ export async function readIndex(context, options = {}) {
             });
         }
 
-        // 先确定最终要分页的文件列表
+        // 如果只需要总数
+        if (countOnly) {
+            return {
+                totalCount: filteredFiles.length,
+                indexLastUpdated: index.lastUpdated
+            };
+        }
+
+        // 分页处理
+        const totalCount = filteredFiles.length;
+
         let resultFiles = filteredFiles;
 
         // 如果不包含子目录文件，获取当前目录下的直接文件
@@ -540,23 +550,10 @@ export async function readIndex(context, options = {}) {
             });
         }
 
-        // 计算正确的总数（基于实际要分页的文件列表）
-        const totalCount = resultFiles.length;
-
-        // 如果只需要总数
-        if (countOnly) {
-            return {
-                totalCount: totalCount,
-                indexLastUpdated: index.lastUpdated
-            };
-        }
-
-        // 分页处理
-        let paginatedFiles = resultFiles;
         if (count !== -1) {
             const startIndex = Math.max(0, start);
             const endIndex = startIndex + Math.max(1, count);
-            paginatedFiles = resultFiles.slice(startIndex, endIndex);
+            resultFiles = resultFiles.slice(startIndex, endIndex);
         }
 
         // 提取目录信息
@@ -574,11 +571,11 @@ export async function readIndex(context, options = {}) {
         });
 
         return {
-            files: paginatedFiles,
+            files: resultFiles,
             directories: Array.from(directories),
             totalCount: totalCount,
             indexLastUpdated: index.lastUpdated,
-            returnedCount: paginatedFiles.length,
+            returnedCount: resultFiles.length,
             success: true
         };
 
@@ -811,11 +808,8 @@ async function getAllPendingOperations(context, lastOperationId = null) {
             });
             
             for (const item of response.keys) {
-                // 提取操作 ID
-                const operationId = item.name.substring(OPERATION_KEY_PREFIX.length);
-                
                 // 如果指定了lastOperationId，跳过已处理的操作
-                if (lastOperationId && operationId <= lastOperationId) {
+                if (lastOperationId && item.name <= OPERATION_KEY_PREFIX + lastOperationId) {
                     continue;
                 }
                 
@@ -828,7 +822,7 @@ async function getAllPendingOperations(context, lastOperationId = null) {
                     const operationData = await db.get(item.name);
                     if (operationData) {
                         const operation = JSON.parse(operationData);
-                        operation.id = operationId;
+                        operation.id = item.name.substring(OPERATION_KEY_PREFIX.length);
                         operations.push(operation);
                         operationCount++;
                     }
@@ -924,6 +918,12 @@ function applyBatchAddOperation(index, data) {
     let addedCount = 0;
     let updatedCount = 0;
     
+    // 创建现有文件ID的映射以提高查找效率
+    const existingFilesMap = new Map();
+    index.files.forEach((file, idx) => {
+        existingFilesMap.set(file.id, idx);
+    });
+    
     for (const fileData of files) {
         const { fileId, metadata } = fileData;
         const fileItem = {
@@ -931,10 +931,9 @@ function applyBatchAddOperation(index, data) {
             metadata: metadata || {}
         };
         
-        // 直接查找现有文件
-        const existingIndex = index.files.findIndex(file => file.id === fileId);
+        const existingIndex = existingFilesMap.get(fileId);
         
-        if (existingIndex !== -1) {
+        if (existingIndex !== undefined) {
             if (!skipExisting) {
                 // 更新现有文件
                 index.files[existingIndex] = fileItem;
@@ -943,6 +942,11 @@ function applyBatchAddOperation(index, data) {
         } else {
             // 添加新文件
             insertFileInOrder(index.files, fileItem);
+            // 更新映射
+            index.files.forEach((file, idx) => {
+                existingFilesMap.set(file.id, idx);
+            });
+            
             addedCount++;
         }
     }
@@ -974,11 +978,21 @@ function applyBatchMoveOperation(index, data) {
     const { operations } = data;
     let movedCount = 0;
     
+    // 创建现有文件ID的映射以提高查找效率
+    const existingFilesMap = new Map();
+    index.files.forEach((file, idx) => {
+        existingFilesMap.set(file.id, idx);
+    });
+    
     for (const operation of operations) {
         const { originalFileId, newFileId, metadata } = operation;
         
-        const originalIndex = index.files.findIndex(file => file.id === originalFileId);
-        if (originalIndex !== -1) {
+        const originalIndex = existingFilesMap.get(originalFileId);
+        if (originalIndex !== undefined) {
+            // 更新映射
+            existingFilesMap.delete(originalFileId);
+            existingFilesMap.set(newFileId, originalIndex);
+            
             // 更新文件信息
             index.files[originalIndex] = {
                 id: newFileId,
